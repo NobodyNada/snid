@@ -1,0 +1,32 @@
+[package]
+name = "snid"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.97"
+console-subscriber = "0.4.1"
+futures = "0.3.31"
+jemallocator = { version = "0.5.4", optional = true }
+libc = "0.2.171"
+prost = "0.13.5"
+rand = "0.9.0"
+tokio = { version = "1.44.1", features = ["rt", "sync", "net", "signal", "tracing"] }
+tokio-serial = "5.4.5"
+tokio-stream = "0.1.17"
+tokio-util = "0.7.14"
+tonic = "0.13.0"
+tower-http = { version = "0.6.2", features = ["trace"] }
+tracing = "0.1.41"
+tracing-flame = "0.2.0"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-build = "0.13.0"
+
+[profile.release-debuginfo]
+inherits = "release"
+debug = 1
+
+[features]
+jemallocator = ["dep:jemallocator"]
