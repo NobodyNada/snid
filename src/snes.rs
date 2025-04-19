@@ -2,12 +2,10 @@ use std::collections::VecDeque;
 use std::pin::pin;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use std::{mem::MaybeUninit, os::fd::AsRawFd};
 
 use anyhow::{Result, anyhow};
 use futures::future::try_join;
 use futures::{Stream, TryStreamExt};
-use libc::{BOTHER, CBAUD, TCGETS2, TCSETS2, ioctl, termios2};
 use rand::Fill;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::TrySendError;
@@ -190,24 +188,7 @@ impl Snes {
         drop(self);
 
         // Open the serial port.
-        let serial = tokio_serial::new("/dev/ttyS1", 9600).open_native_async()?;
-
-        // Set a custom baud rate.
-        let fd = serial.as_raw_fd();
-        unsafe {
-            let mut termios = MaybeUninit::<termios2>::uninit();
-            if ioctl(fd, TCGETS2, &raw mut termios) == -1 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-
-            let mut termios = termios.assume_init();
-            termios.c_cflag = (termios.c_cflag & !CBAUD) | BOTHER;
-            termios.c_ispeed = 31250;
-            termios.c_ospeed = 31250;
-            if ioctl(fd, TCSETS2, &raw const termios) == -1 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-        }
+        let serial = tokio_serial::new("/dev/ttyS1", 115200).open_native_async()?;
 
         // Apply read buffering.
         let mut serial = BufReader::new(serial);
@@ -380,6 +361,7 @@ impl Snes {
         rx
     }
 
+    #[tracing::instrument(skip(rx, tx, serial))]
     async fn handle_requests(
         rx: &mut mpsc::Receiver<Request>,
         tx: mpsc::Sender<Request>,
@@ -417,6 +399,7 @@ impl Snes {
         }
     }
 
+    #[tracing::instrument(skip(rx, serial))]
     async fn handle_responses(
         mut rx: mpsc::Receiver<Request>,
         serial: impl AsyncRead,
@@ -435,10 +418,10 @@ impl Snes {
         let mut serial = pin!(serial);
 
         let len = serial.read_u8().await?;
-        trace!("read_response: len {len}");
+        trace!("Response length: {len}");
         let mut buf = vec![0; len as usize];
         serial.read_exact(&mut buf).await?;
-        trace!("read_response: {buf:?}");
+        trace!("Resonse data: {buf:?}");
 
         Ok(buf)
     }
