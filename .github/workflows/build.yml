@@ -33,3 +33,9 @@ jobs:
       with:
         name: snid
         path: target/armv7-unknown-linux-musleabihf/release/snid
+      
+    - name: Release
+      uses: softprops/action-gh-release@v2
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: target/armv7-unknown-linux-musleabihf/release/snid
