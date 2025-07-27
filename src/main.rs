@@ -41,7 +41,11 @@ async fn main() -> anyhow::Result<ExitCode> {
 
     // - Initialize the SNI server.
     let sni_addr = "0.0.0.0:8191".parse()?;
-    let sni_task = server::sni::run(sni_addr, snes, cancel.child_token());
+    let sni_task = server::sni::run(sni_addr, snes.clone(), cancel.child_token());
+
+    // - Initialize the QUsb2snes server.
+    let qusb_addr = "0.0.0.0:23074".parse()?;
+    let qusb_task = server::qusb::run(qusb_addr, snes, cancel.child_token());
 
     // - Listen for Ctrl+C presses.
     let cancel_ = cancel.clone();
@@ -64,6 +68,7 @@ async fn main() -> anyhow::Result<ExitCode> {
     let mut tasks = JoinSet::new();
     tasks.build_task().name("SNI").spawn(sni_task)?;
     tasks.build_task().name("SNES").spawn(snes_task)?;
+    tasks.build_task().name("QUsb2snes").spawn(qusb_task)?;
     tasks
         .build_task()
         .name("CtrlC")

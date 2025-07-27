@@ -79,7 +79,10 @@ fn translate_addr(addr: u32, address_space: grpc::AddressSpace) -> u32 {
     match address_space {
         AddressSpace::FxPakPro | AddressSpace::Raw => addr,
         AddressSpace::SnesABus => match addr {
-            0x7E_0000..=0x7E_FFFF => (addr & 0x1_ffff) + 0xF5_0000,
+            0x7E_0000..=0x7F_FFFF => (addr & 0x1_ffff) + 0xF5_0000,
+            addr if (addr & 0xffff) < 0x2000 && (addr & 0x7F_0000) < 0x40_0000 => {
+                (addr & 0xffff) + 0xF5_0000
+            }
             _ => 0xFF_FFFF,
         },
     }
