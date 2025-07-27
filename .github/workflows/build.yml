@@ -17,8 +17,8 @@ jobs:
     steps:
     - name: Install dependencies
       run: |
-        apt-get update
-        apt-get install -y protobuf-compiler
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler
         rustup update
         rustup target add armv7-unknown-linux-musleabihf
       
