@@ -1,0 +1,35 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y protobuf-compiler
+        rustup update
+        rustup target add armv7-unknown-linux-musleabihf
+      
+    - uses: actions/checkout@v4
+      name: Check out repository
+
+    - name: Build
+      run: cargo build --release
+      
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: snid
+        path: target/armv7-unknown-linux-musleabihf/release/snid
