@@ -76,14 +76,16 @@ impl Snes {
         anyhow!("The SNES core is not connected")
     }
 
+    const MAX_REQUEST_LEN: usize = 255;
+
     /// Reads memory from the attached SNES core.
     #[tracing::instrument]
     pub async fn read(&self, address: u32, len: usize) -> Result<Vec<u8>> {
-        // Each read request can read a maximum of 256 bytes,
+        // Each read request can read a maximum of 255 bytes,
         // so split into multiple requests if needed.
         // Fire off the requests all at once, then wait for them all at once.
-        let mut chunks = Vec::with_capacity((len + 255) / 256);
-        for offset in (0..len).step_by(256) {
+        let mut chunks = Vec::with_capacity(len.div_ceil(Self::MAX_REQUEST_LEN));
+        for offset in (0..len).step_by(255) {
             let address = (address.wrapping_add(offset as u32)).to_le_bytes();
             chunks.push(
                 self.send([
@@ -91,7 +93,7 @@ impl Snes {
                     address[0],
                     address[1],
                     address[2],
-                    (len - offset).min(255) as u8,
+                    (len - offset).min(Self::MAX_REQUEST_LEN) as u8,
                 ])
                 .await,
             );
@@ -114,9 +116,11 @@ impl Snes {
         // Each read request can write a maximum of 256 bytes,
         // so split into multiple requests if needed.
         // Fire off the requests all at once, then wait for them all at once.
-        let mut chunks = Vec::with_capacity((data.len() + 255) / 256);
-        for (i, chunk) in data.chunks(256).enumerate() {
-            let address = (address.wrapping_add((i as u32).wrapping_mul(256))).to_le_bytes();
+        let mut chunks = Vec::with_capacity(data.len().div_ceil(Self::MAX_REQUEST_LEN));
+        for (i, chunk) in data.chunks(Self::MAX_REQUEST_LEN).enumerate() {
+            let address = (address
+                .wrapping_add((i as u32).wrapping_mul(Self::MAX_REQUEST_LEN as u32)))
+            .to_le_bytes();
             chunks.push(
                 self.send(
                     [
