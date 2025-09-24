@@ -74,29 +74,17 @@ fn internal_error(e: anyhow::Error) -> Status {
     Status::internal(e.to_string())
 }
 
-/// Converts an address into the FxPak address space we use.
-fn translate_addr(addr: u32, address_space: grpc::AddressSpace) -> u32 {
-    match address_space {
-        AddressSpace::FxPakPro | AddressSpace::Raw => addr,
-        AddressSpace::SnesABus => match addr {
-            // TODO: support translating ROM addresses
-            // this will need communication with the core to detect ROM type
-            0x7E_0000..=0x7F_FFFF => (addr & 0x1_ffff) + 0xF5_0000,
-            addr if (addr & 0xffff) < 0x2000 && (addr & 0x7F_0000) < 0x40_0000 => {
-                (addr & 0xffff) + 0xF5_0000
-            }
-            _ => 0xFF_FFFF,
-        },
-    }
-}
-
 impl SniService {
     #[tracing::instrument]
     async fn read(
         &self,
         request: grpc::ReadMemoryRequest,
     ) -> Result<grpc::ReadMemoryResponse, tonic::Status> {
-        let addr = translate_addr(request.request_address, request.request_address_space());
+        let addr = translate_addr(
+            request.request_address,
+            request.request_address_space(),
+            request.request_memory_mapping(),
+        );
         Ok(grpc::ReadMemoryResponse {
             request_address: request.request_address,
             request_address_space: request.request_address_space,
@@ -116,7 +104,11 @@ impl SniService {
         &self,
         request: grpc::WriteMemoryRequest,
     ) -> Result<grpc::WriteMemoryResponse, tonic::Status> {
-        let addr = translate_addr(request.request_address, request.request_address_space());
+        let addr = translate_addr(
+            request.request_address,
+            request.request_address_space(),
+            request.request_memory_mapping(),
+        );
         let size = request.data.len() as u32;
         self.snes
             .write(addr, request.data)
@@ -293,7 +285,11 @@ impl DeviceMemory for Arc<SniService> {
                     .iter()
                     .map(|req| {
                         (
-                            translate_addr(req.request_address, req.request_address_space()),
+                            translate_addr(
+                                req.request_address,
+                                req.request_address_space(),
+                                req.request_memory_mapping(),
+                            ),
                             req.size as usize,
                         )
                     })
@@ -318,6 +314,7 @@ impl DeviceMemory for Arc<SniService> {
                                     device_address: translate_addr(
                                         request.request_address,
                                         request.request_address_space(),
+                                        request.request_memory_mapping(),
                                     ),
                                     device_address_space: grpc::AddressSpace::FxPakPro as i32,
                                     data,
@@ -333,5 +330,98 @@ impl DeviceMemory for Arc<SniService> {
         }));
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+/// Converts an address into the FxPak address space we use.
+fn translate_addr(
+    addr: u32,
+    address_space: grpc::AddressSpace,
+    mapping: grpc::MemoryMapping,
+) -> u32 {
+    match address_space {
+        AddressSpace::FxPakPro | AddressSpace::Raw => addr,
+        AddressSpace::SnesABus => match addr {
+            // TODO: support translating ROM addresses
+            // this will need communication with the core to detect ROM type
+            0x7E_0000..=0x7F_FFFF => (addr & 0x1_ffff) + 0xF5_0000,
+            addr if (addr & 0xffff) < 0x2000 && (addr & 0x7F_0000) < 0x40_0000 => {
+                (addr & 0xffff) + 0xF5_0000
+            }
+            addr if (addr & 0x8000) != 0 || (addr & 0x40_0000) != 0 => match mapping {
+                grpc::MemoryMapping::Unknown => 0xFF_FFFF,
+                grpc::MemoryMapping::LoRom => {
+                    if addr & 0x8000 != 0 {
+                        (addr & 0x7F_0000) >> 1 | (addr & 0x7FFF)
+                    } else {
+                        0xFF_0000
+                    }
+                }
+                grpc::MemoryMapping::HiRom => {
+                    if addr & 0x8000 != 0 || addr & 0x40_0000 != 0 {
+                        addr & 0x3F_FFFF
+                    } else {
+                        0xFF_0000
+                    }
+                }
+                grpc::MemoryMapping::ExHiRom => {
+                    if addr & 0x8000 != 0 || addr & 0x40_0000 != 0 {
+                        addr & 0x3F_FFFF | (!addr & 0x80_0000) >> 1
+                    } else {
+                        0xFF_0000
+                    }
+                }
+                grpc::MemoryMapping::Sa1 => {
+                    if (addr & 0xC0_0000) == 0xC0_0000 {
+                        addr & 0x3F_FFFF
+                    } else if addr & 0x40_0000 == 0 && addr & 0x8000 != 0 {
+                        (addr & 0x7F_0000) >> 1 | (addr & 0x7FFF)
+                    } else {
+                        0xFF_FFFF
+                    }
+                }
+            },
+            _ => 0xFF_FFFF,
+        },
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::server::sni::{
+        grpc::{AddressSpace::*, MemoryMapping::*},
+        translate_addr,
+    };
+
+    #[test]
+    fn test_addr_translation() {
+        assert_eq!(translate_addr(0x000000, SnesABus, LoRom), 0xF5_0000);
+        assert_eq!(translate_addr(0x7E0000, SnesABus, LoRom), 0xF5_0000);
+        assert_eq!(translate_addr(0x800000, SnesABus, LoRom), 0xF5_0000);
+
+        assert_eq!(translate_addr(0x008123, SnesABus, LoRom), 0x0123);
+        assert_eq!(translate_addr(0x808123, SnesABus, LoRom), 0x0123);
+        assert_eq!(translate_addr(0x818123, SnesABus, LoRom), 0x8123);
+        assert_eq!(translate_addr(0x828123, SnesABus, LoRom), 0x10123);
+
+        assert_eq!(translate_addr(0x008123, SnesABus, HiRom), 0x8123);
+        assert_eq!(translate_addr(0x808123, SnesABus, HiRom), 0x8123);
+        assert_eq!(translate_addr(0xC08123, SnesABus, HiRom), 0x8123);
+        assert_eq!(translate_addr(0xC00123, SnesABus, HiRom), 0x0123);
+
+        assert_eq!(translate_addr(0x008123, SnesABus, ExHiRom), 0x40_8123);
+        assert_eq!(translate_addr(0x808123, SnesABus, ExHiRom), 0x8123);
+        assert_eq!(translate_addr(0xC08123, SnesABus, ExHiRom), 0x8123);
+        assert_eq!(translate_addr(0xC00123, SnesABus, ExHiRom), 0x0123);
+
+        assert_eq!(translate_addr(0x008123, SnesABus, Sa1), 0x0123);
+        assert_eq!(translate_addr(0x808123, SnesABus, Sa1), 0x0123);
+        assert_eq!(translate_addr(0x818123, SnesABus, Sa1), 0x8123);
+        assert_eq!(translate_addr(0x828123, SnesABus, Sa1), 0x10123);
+
+        assert_eq!(translate_addr(0xC0_0123, SnesABus, Sa1), 0x00_0123);
+        assert_eq!(translate_addr(0xC0_8123, SnesABus, Sa1), 0x00_8123);
+        assert_eq!(translate_addr(0xC1_0123, SnesABus, Sa1), 0x01_0123);
+        assert_eq!(translate_addr(0xD2_0123, SnesABus, Sa1), 0x12_0123);
     }
 }
