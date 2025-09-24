@@ -162,8 +162,6 @@ async fn execute(cmd: Command, snes: Arc<Snes>, payload: Option<&[u8]>) -> Resul
                 "No Info",
                 "NO_FILE_CMD",
                 "NO_CONTROL_CMD",
-                "NO_ROM_WRITE",
-                "NO_ROM_READ",
             ]
             .iter()
             .map(|s| s.to_string())
