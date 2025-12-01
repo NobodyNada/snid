@@ -169,7 +169,7 @@ async fn execute(cmd: Command, snes: Arc<Snes>, payload: Option<&[u8]>) -> Resul
         )),
 
         Opcode::AppVersion => reply(Response::Results(vec![
-            env!("CARGO_PKG_VERSION").to_string(),
+            concat!(env!("CARGO_PKG_NAME"), "-", env!("CARGO_PKG_VERSION")).to_string(),
         ])),
 
         Opcode::Name => Ok(None),
@@ -283,6 +283,8 @@ async fn write_message_or_error(
 #[serde(rename_all = "PascalCase")]
 pub struct Command {
     opcode: Opcode,
+
+    #[serde(default)] // archipelago is bad-behaved and doesn't send this sometimes
     space: Space,
 
     #[allow(unused)]
@@ -326,9 +328,10 @@ pub enum Opcode {
     QUsb2SnesRegisterApplication,
 }
 
-#[derive(Deserialize, PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(Deserialize, PartialEq, Eq, Clone, Copy, Debug, Default)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Space {
+    #[default]
     Snes,
     Cmd,
 }
