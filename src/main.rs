@@ -7,6 +7,7 @@ use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod server;
 mod snes;
+mod stresstest;
 
 #[cfg(feature = "jemallocator")]
 #[global_allocator]
@@ -38,6 +39,7 @@ async fn main() -> anyhow::Result<ExitCode> {
 
     // - Initialize the SNES core UART interface.
     let (snes, snes_task) = snes::Snes::run();
+    let snes_task = async { snes_task.await.map_err(anyhow::Error::from) };
 
     // - Initialize the SNI server.
     let sni_addr = "0.0.0.0:8191".parse()?;
@@ -45,7 +47,7 @@ async fn main() -> anyhow::Result<ExitCode> {
 
     // - Initialize the QUsb2snes server.
     let qusb_addr = "0.0.0.0:23074".parse()?;
-    let qusb_task = server::qusb::run(qusb_addr, snes, cancel.child_token());
+    let qusb_task = server::qusb::run(qusb_addr, snes.clone(), cancel.child_token());
 
     // - Listen for Ctrl+C presses.
     let cancel_ = cancel.clone();
@@ -69,6 +71,17 @@ async fn main() -> anyhow::Result<ExitCode> {
     tasks.build_task().name("SNI").spawn(sni_task)?;
     tasks.build_task().name("SNES").spawn(snes_task)?;
     tasks.build_task().name("QUsb2snes").spawn(qusb_task)?;
+    if std::env::args().nth(1).as_deref() == Some("stresstest") {
+        let cancel = cancel.child_token();
+        tasks.build_task().name("Stress Test").spawn(async move {
+            cancel
+                .run_until_cancelled(stresstest::run(snes))
+                .await
+                .unwrap_or(Ok(()))
+        })?;
+    } else {
+        drop(snes);
+    }
     tasks
         .build_task()
         .name("CtrlC")

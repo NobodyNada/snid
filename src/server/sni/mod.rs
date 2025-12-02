@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming, async_trait, transport::Server};
 use tracing::trace;
 
-use crate::snes::Snes;
+use crate::snes::{self, Snes};
 
 /// Runs the SNI gRPC server.
 pub async fn run(
@@ -69,8 +69,8 @@ impl Devices for Arc<SniService> {
     }
 }
 
-/// Converts an anyhow::Error to a gRPC response.
-fn internal_error(e: anyhow::Error) -> Status {
+/// Converts a snes::Error to a gRPC response.
+fn internal_error(e: snes::Error) -> Status {
     Status::internal(e.to_string())
 }
 

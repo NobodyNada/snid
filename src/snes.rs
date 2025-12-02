@@ -3,12 +3,13 @@ use std::pin::pin;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
 use futures::future::try_join;
 use futures::{Stream, TryStreamExt};
 use rand::Fill;
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::timeout;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader, split},
@@ -17,7 +18,7 @@ use tokio::{
 };
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 
 /// Handles communication with the SNES core over UART.
 ///
@@ -25,12 +26,25 @@ use tracing::{info, trace};
 /// response, while a streaming request generates a respoonse once per frame.
 #[derive(Debug)]
 pub struct Snes {
-    // Channel for sending requests to the SNES task.
+    /// Channel for sending requests to the SNES task.
     tx: mpsc::Sender<Request>,
 
-    // Channel for sending streaming requests to the SNES task.
+    /// Channel for sending streaming requests to the SNES task.
     stream_tx: mpsc::Sender<StreamRequest>,
 }
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("The SNES core is not connected.")]
+    Disconnected,
+
+    #[error("Serial communication error")]
+    Serial(#[from] tokio_serial::Error),
+
+    #[error("I/O error")]
+    Io(#[from] std::io::Error),
+}
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// A oneshot request.
 #[derive(Debug)]
@@ -40,6 +54,9 @@ struct Request {
 
     /// Once the core replies, the data recieved in response to the command.
     response: oneshot::Sender<Result<Vec<u8>>>,
+
+    /// A semaphore permit for the RX buffer capacity used by this command.
+    buffer_space: Option<OwnedSemaphorePermit>,
 }
 
 /// A streaming request.
@@ -62,6 +79,11 @@ enum Command {
 type Serial = BufReader<SerialStream>;
 
 impl Snes {
+    const MAX_REQUEST_LEN: usize = 255;
+    const RX_BUFFER_LEN: usize = 512;
+    const REQUEST_TIMEOUT_MS: u64 = 1000;
+    const RESPONSE_TIMEOUT_MS: u64 = 1000;
+
     /// Starts the SNES interface.
     ///
     /// The interface will be stopped once all outstanding references are dropped.
@@ -71,12 +93,6 @@ impl Snes {
         let snes = Arc::new(Snes { tx, stream_tx });
         (snes.clone(), snes._run(rx, stream_rx))
     }
-
-    fn disconnected() -> anyhow::Error {
-        anyhow!("The SNES core is not connected")
-    }
-
-    const MAX_REQUEST_LEN: usize = 255;
 
     /// Reads memory from the attached SNES core.
     #[tracing::instrument]
@@ -102,7 +118,7 @@ impl Snes {
         let mut result = Vec::with_capacity(len);
         for chunk in chunks {
             let Ok(buf) = chunk.await else {
-                return Err(Self::disconnected());
+                return Err(Error::Disconnected);
             };
             result.append(&mut buf?);
         }
@@ -138,7 +154,7 @@ impl Snes {
         }
 
         for chunk in chunks {
-            chunk.await.unwrap_or_else(|_| Err(Self::disconnected()))?;
+            chunk.await.unwrap_or_else(|_| Err(Error::Disconnected))?;
         }
         Ok(())
     }
@@ -186,7 +202,7 @@ impl Snes {
         self: Arc<Self>,
         mut reqs: mpsc::Receiver<Request>,
         mut stream_reqs: mpsc::Receiver<StreamRequest>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         // Don't hold a strong reference to self.
         let snes = Arc::downgrade(&self);
         drop(self);
@@ -205,14 +221,14 @@ impl Snes {
                 // Let any streaming clients know that we don't have a connection.
                 streams.retain(|req| {
                     !matches!(
-                        req.response.try_send(Err(Self::disconnected())),
+                        req.response.try_send(Err(Error::Disconnected)),
                         Err(TrySendError::Closed(_))
                     )
                 });
 
                 // Start the handshake task with a timeout.
                 let mut connecting = pin!(timeout(
-                    Duration::from_millis(100),
+                    Duration::from_millis(200),
                     Self::establish_connection(&mut serial)
                 ));
                 loop {
@@ -287,7 +303,7 @@ impl Snes {
     }
 
     #[tracing::instrument(skip(serial))]
-    async fn establish_connection(serial: &mut Serial) -> anyhow::Result<()> {
+    async fn establish_connection(serial: &mut Serial) -> Result<()> {
         info!("Trying to establish serial connection");
         let (mut rx, mut tx) = split(serial);
 
@@ -339,12 +355,14 @@ impl Snes {
         &self,
         request: impl IntoIterator<Item = u8> + std::fmt::Debug,
     ) -> oneshot::Receiver<Result<Vec<u8>>> {
+        let request: Vec<u8> = request.into_iter().collect();
         let (tx, rx) = oneshot::channel();
         _ = self
             .tx
             .send(Request {
-                request: request.into_iter().collect(),
+                request,
                 response: tx,
+                buffer_space: None,
             })
             .await;
         rx
@@ -372,6 +390,7 @@ impl Snes {
         serial: impl AsyncWrite,
     ) -> Result<()> {
         let mut serial = pin!(serial);
+        let rx_buffer_space = Arc::new(Semaphore::new(Self::RX_BUFFER_LEN));
         loop {
             select! {
                 req = rx.recv() => match req {
@@ -379,20 +398,30 @@ impl Snes {
                     None => return Ok(()),
 
                     // We have a request, handle it
-                    Some(req) => {
+                    Some(mut req) => {
                         trace!("Sending request: {:?}", req.request);
+                        req.buffer_space = Some(
+                            rx_buffer_space
+                            .clone()
+                            .acquire_many_owned(req.request.len() as u32)
+                            .await
+                            .unwrap()
+                        );
                         match timeout(
-                            Duration::from_millis(100),
+                            Duration::from_millis(Self::REQUEST_TIMEOUT_MS),
                             serial.write_all(&req.request)
                             ).await {
                                 // Success, pass it along to the responder
                                 Ok(Ok(())) => _ = tx.send(req).await,
 
                                 // Failed, bail out
-                                Ok(Err(e)) => return Err(anyhow!(e)),
+                                Ok(Err(e)) => return Err(Error::Io(e)),
 
                                 // Timed out, end the task so we can try to reconnect
-                                Err(_) => return Ok(()),
+                                Err(_) => {
+                                    warn!("Timed out writing request to SNES core");
+                                    return Ok(())
+                                },
                         }
                         trace!("Request written");
                     }
@@ -410,9 +439,17 @@ impl Snes {
     ) -> Result<()> {
         let mut serial = pin!(serial);
         while let Some(req) = rx.recv().await {
-            match timeout(Duration::from_millis(100), Self::read_response(&mut serial)).await {
+            match timeout(
+                Duration::from_millis(Self::RESPONSE_TIMEOUT_MS),
+                Self::read_response(&mut serial),
+            )
+            .await
+            {
                 Ok(resp) => _ = req.response.send(resp),
-                Err(_) => return Ok(()),
+                Err(_) => {
+                    warn!("Timed out reading response from SNES core");
+                    return Ok(());
+                }
             }
         }
         Ok(())
@@ -447,7 +484,7 @@ impl Snes {
         // Now wait for the command responses
         let mut responses = VecDeque::with_capacity(commands.len());
         for command in commands {
-            responses.push_back(command.await.unwrap_or_else(|_| Err(Self::disconnected())));
+            responses.push_back(command.await.unwrap_or_else(|_| Err(Error::Disconnected)));
         }
 
         streams.retain_mut(|stream| {
