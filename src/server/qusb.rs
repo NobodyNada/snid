@@ -59,7 +59,12 @@ async fn serve(
 
     let write = Arc::new(Mutex::new(write));
     while let Some(cmd) = read.next().await {
-        let cmd: Command = match serde_json::from_slice(&cmd?.into_data()) {
+        let cmd = cmd?.into_data();
+        if cmd.is_empty() {
+            // emotracker seems to  send empty packets for some reason?
+            continue;
+        }
+        let cmd: Command = match serde_json::from_slice(&cmd) {
             Ok(c) => c,
             Err(e) => {
                 if let Some(inflight) = inflight_commands.take() {
