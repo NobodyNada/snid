@@ -70,13 +70,7 @@ async fn serve(
                 if let Some(inflight) = inflight_commands.take() {
                     _ = inflight.await;
                 }
-                write_error(
-                    &mut *write.lock().await,
-                    e,
-                    ErrorType::ProtocolError,
-                    cancel.clone(),
-                )
-                .await;
+                write_error(e, cancel.clone()).await;
                 continue;
             }
         };
@@ -105,13 +99,7 @@ async fn serve(
                     if let Some(inflight) = inflight_commands.take() {
                         _ = inflight.await;
                     }
-                    write_error(
-                        &mut *write.lock().await,
-                        e,
-                        ErrorType::ProtocolError,
-                        cancel.clone(),
-                    )
-                    .await;
+                    write_error(e, cancel.clone()).await;
                     continue;
                 }
 
@@ -131,13 +119,7 @@ async fn serve(
                     _ = inflight.await;
                 }
                 if let Some(response) = response.transpose() {
-                    write_message_or_error(
-                        &mut *write.lock().await,
-                        response,
-                        ErrorType::DeviceError,
-                        cancel,
-                    )
-                    .await;
+                    write_message_or_error(&mut *write.lock().await, response, cancel).await;
                 }
                 _ = tx.send(());
             });
@@ -192,21 +174,21 @@ async fn execute_memory_command(
     snes: Arc<Snes>,
 ) -> Result<Option<Message>> {
     if operands.len() % 2 != 0 {
-        return protocol_error("Memory command operands are not a multiple of 2");
+        bail!("Memory command operands are not a multiple of 2");
     }
 
     let mut requests = Vec::new();
     for op in operands.chunks_exact(2) {
         let Ok(addr) = u32::from_str_radix(&op[0], 16) else {
-            return protocol_error("Address is invalid");
+            bail!("Address is invalid");
         };
         let Ok(len) = u32::from_str_radix(&op[1], 16) else {
-            return protocol_error("Length is invalid");
+            bail!("Length is invalid");
         };
 
         let payload = if let Some(payload) = write_payload.as_mut() {
             if payload.len() < len as usize {
-                return protocol_error("Payload length mismatch");
+                bail!("Payload length mismatch");
             }
             let (p, remainder) = payload.split_at(len as usize);
             *payload = remainder;
@@ -237,13 +219,6 @@ async fn execute_memory_command(
     }
 }
 
-fn protocol_error(text: impl ToString) -> Result<Option<Message>> {
-    let response = Response::Error {
-        error_type: ErrorType::ProtocolError,
-        text: text.to_string(),
-    };
-    reply(response)
-}
 fn reply(response: Response) -> Result<Option<Message>> {
     Ok(Some(Message::text(
         serde_json::to_string(&response).unwrap(),
@@ -259,28 +234,21 @@ async fn write_message(write: &mut MessageSink, message: Message, cancel: Cancel
     }
 }
 
-async fn write_error(
-    write: &mut MessageSink,
-    error: impl Display,
-    error_type: ErrorType,
-    cancel: CancellationToken,
-) {
+async fn write_error(error: impl Display, cancel: CancellationToken) {
     let text = error.to_string();
     error!("{}", &text);
-    let reply = Response::Error { error_type, text };
-    let message = Message::text(serde_json::to_string(&reply).unwrap());
-    write_message(write, message, cancel).await;
+    // QUsb2snes has no error-reporting mechanism; the server just closes the connection :/
+    cancel.cancel();
 }
 
 async fn write_message_or_error(
     write: &mut MessageSink,
     message: Result<Message>,
-    error_type: ErrorType,
     cancel: CancellationToken,
 ) {
     match message {
         Ok(m) => write_message(write, m, cancel).await,
-        Err(e) => write_error(write, e, error_type, cancel).await,
+        Err(e) => write_error(e, cancel).await,
     }
 }
 
@@ -344,19 +312,4 @@ pub enum Space {
 #[derive(Serialize, Clone, Debug)]
 pub enum Response {
     Results(Vec<String>),
-
-    #[serde(rename_all = "PascalCase")]
-    Error {
-        #[serde(rename = "Type")]
-        error_type: ErrorType,
-        text: String,
-    },
-}
-
-#[derive(Serialize, PartialEq, Eq, Clone, Copy, Debug)]
-#[allow(dead_code, clippy::enum_variant_names)]
-pub enum ErrorType {
-    CommandError,
-    ProtocolError,
-    DeviceError,
 }
