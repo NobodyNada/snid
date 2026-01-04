@@ -173,7 +173,7 @@ async fn execute_memory_command(
     mut write_payload: Option<&[u8]>,
     snes: Arc<Snes>,
 ) -> Result<Option<Message>> {
-    if operands.len() % 2 != 0 {
+    if !operands.len().is_multiple_of(2) {
         bail!("Memory command operands are not a multiple of 2");
     }
 
