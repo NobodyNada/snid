@@ -15,7 +15,7 @@ use tokio::{
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, trace};
 
 use crate::snes::Snes;
 
@@ -74,6 +74,7 @@ async fn serve(
                 continue;
             }
         };
+        trace!("Received QUsb2snes command: {cmd:?}");
 
         if cmd.opcode == Opcode::Close {
             return Ok(());
