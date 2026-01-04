@@ -36,8 +36,9 @@ pub async fn run(snes: Arc<Snes>) -> Result<()> {
     // Bank FF doesn't contain anything important
     let rom = Memory::new("ROM", (0xFF_0000 - 0x80_0000) >> 1, 0x8000);
     let wram = Memory::new("WRAM", 0xF6_FC00, 0x400);
+    let sram = Memory::new("SRAM", 0xE1_0000, 0x8000);
 
-    let memories = [rom, wram];
+    let memories = [rom, wram, sram];
     for memory in &memories {
         loop {
             match snes
