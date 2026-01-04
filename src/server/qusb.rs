@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use futures::future::join_all;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt, channel::oneshot};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::Mutex,
@@ -64,6 +64,7 @@ async fn serve(
             // emotracker seems to  send empty packets for some reason?
             continue;
         }
+        trace!("Received QUsb2snes command: {cmd:?}");
         let cmd: Command = match serde_json::from_slice(&cmd) {
             Ok(c) => c,
             Err(e) => {
@@ -74,7 +75,6 @@ async fn serve(
                 continue;
             }
         };
-        trace!("Received QUsb2snes command: {cmd:?}");
 
         if cmd.opcode == Opcode::Close {
             return Ok(());
@@ -265,8 +265,16 @@ pub struct Command {
     #[serde(default)]
     flags: Option<Vec<String>>, // idk what these are, the docs don't say and i don't feel like digging
 
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_operands")]
     operands: Vec<String>,
+}
+
+// emotracker sends null operands sometimes
+fn deserialize_operands<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(|v: Option<Vec<_>>| v.unwrap_or_default())
 }
 
 // https://github.com/Skarsnik/QUsb2snes/blob/3dd88ab0549307c8e5038fe301f36e282a863699/core/usb2snes.h#L104
