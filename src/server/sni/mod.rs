@@ -436,33 +436,37 @@ fn translate_addr(
     match address_space {
         AddressSpace::FxPakPro | AddressSpace::Raw => addr,
         AddressSpace::SnesABus => match addr {
-            // TODO: support translating ROM addresses
-            // this will need communication with the core to detect ROM type
+            // WRAM
             0x7E_0000..=0x7F_FFFF => (addr & 0x1_ffff) + 0xF5_0000,
             addr if (addr & 0xffff) < 0x2000 && (addr & 0x7F_0000) < 0x40_0000 => {
                 (addr & 0xffff) + 0xF5_0000
             }
+
+            // ROMSEL
             addr if (addr & 0x8000) != 0 || (addr & 0x40_0000) != 0 => match mapping {
                 grpc::MemoryMapping::Unknown => 0xFF_FFFF,
                 grpc::MemoryMapping::LoRom => {
                     if addr & 0x8000 != 0 {
                         (addr & 0x7F_0000) >> 1 | (addr & 0x7FFF)
+                    } else if (0x70_0000..0x7E_0000).contains(&addr) && addr & 0x8000 == 0 {
+                        // SRAM
+                        0xE0_0000 + ((addr & 0x0F_0000) >> 1 | (addr & 0x7FFF))
                     } else {
-                        0xFF_0000
+                        0xFF_FFFF
                     }
                 }
                 grpc::MemoryMapping::HiRom => {
                     if addr & 0x8000 != 0 || addr & 0x40_0000 != 0 {
                         addr & 0x3F_FFFF
                     } else {
-                        0xFF_0000
+                        0xFF_FFFF
                     }
                 }
                 grpc::MemoryMapping::ExHiRom => {
                     if addr & 0x8000 != 0 || addr & 0x40_0000 != 0 {
                         addr & 0x3F_FFFF | (!addr & 0x80_0000) >> 1
                     } else {
-                        0xFF_0000
+                        0xFF_FFFF
                     }
                 }
                 grpc::MemoryMapping::Sa1 => {
@@ -470,11 +474,30 @@ fn translate_addr(
                         addr & 0x3F_FFFF
                     } else if addr & 0x40_0000 == 0 && addr & 0x8000 != 0 {
                         (addr & 0x7F_0000) >> 1 | (addr & 0x7FFF)
+                    } else if addr & 0xF0_0000 == 0x40_0000 {
+                        // BWRAM
+                        0xE0_0000 + (addr & 0x0F_FFFF)
                     } else {
                         0xFF_FFFF
                     }
                 }
             },
+
+            // HiROM SRAM
+            addr if mapping == grpc::MemoryMapping::HiRom && addr & 0xF0_6000 == 0x30_6000 => {
+                0xE0_0000 + ((addr & 0x0F_0000) >> 3 | (addr & 0x1FFF))
+            }
+
+            // ExHiROM SRAM
+            addr if mapping == grpc::MemoryMapping::ExHiRom && addr & 0x80_6000 == 0x80_6000 => {
+                0xE0_0000 + ((addr & 0x3F_0000) >> 3 | (addr & 0x1FFF))
+            }
+
+            // SA-1 BWRAM mirror
+            addr if mapping == grpc::MemoryMapping::Sa1 && addr & 0x40_6000 == 0x00_6000 => {
+                0xE0_0000 + ((addr & 0x3F_0000) >> 3 | (addr & 0x1FFF))
+            }
+
             _ => 0xFF_FFFF,
         },
     }
@@ -517,5 +540,39 @@ mod test {
         assert_eq!(translate_addr(0xC0_8123, SnesABus, Sa1), 0x00_8123);
         assert_eq!(translate_addr(0xC1_0123, SnesABus, Sa1), 0x01_0123);
         assert_eq!(translate_addr(0xD2_0123, SnesABus, Sa1), 0x12_0123);
+
+        assert_eq!(translate_addr(0x70_0123, SnesABus, LoRom), 0xE0_0123);
+        assert_eq!(translate_addr(0x71_0123, SnesABus, LoRom), 0xE0_8123);
+        assert_eq!(translate_addr(0x72_0123, SnesABus, LoRom), 0xE1_0123);
+        assert_eq!(translate_addr(0x7D_0123, SnesABus, LoRom), 0xE6_8123);
+
+        assert_eq!(translate_addr(0x30_6123, SnesABus, HiRom), 0xE0_0123);
+        assert_eq!(translate_addr(0x30_7123, SnesABus, HiRom), 0xE0_1123);
+        assert_eq!(translate_addr(0x31_6123, SnesABus, HiRom), 0xE0_2123);
+        assert_eq!(translate_addr(0x32_6123, SnesABus, HiRom), 0xE0_4123);
+        assert_eq!(translate_addr(0x3F_6123, SnesABus, HiRom), 0xE1_E123);
+
+        assert_eq!(translate_addr(0x80_6123, SnesABus, ExHiRom), 0xE0_0123);
+        assert_eq!(translate_addr(0x80_7123, SnesABus, ExHiRom), 0xE0_1123);
+        assert_eq!(translate_addr(0x81_6123, SnesABus, ExHiRom), 0xE0_2123);
+        assert_eq!(translate_addr(0x82_6123, SnesABus, ExHiRom), 0xE0_4123);
+        assert_eq!(translate_addr(0xBF_6123, SnesABus, ExHiRom), 0xE7_E123);
+
+        assert_eq!(translate_addr(0x00_6123, SnesABus, Sa1), 0xE0_0123);
+        assert_eq!(translate_addr(0x00_7123, SnesABus, Sa1), 0xE0_1123);
+        assert_eq!(translate_addr(0x01_6123, SnesABus, Sa1), 0xE0_2123);
+        assert_eq!(translate_addr(0x02_6123, SnesABus, Sa1), 0xE0_4123);
+        assert_eq!(translate_addr(0x3F_6123, SnesABus, Sa1), 0xE7_E123);
+
+        assert_eq!(translate_addr(0x80_6123, SnesABus, Sa1), 0xE0_0123);
+        assert_eq!(translate_addr(0x80_7123, SnesABus, Sa1), 0xE0_1123);
+        assert_eq!(translate_addr(0x81_6123, SnesABus, Sa1), 0xE0_2123);
+        assert_eq!(translate_addr(0x82_6123, SnesABus, Sa1), 0xE0_4123);
+        assert_eq!(translate_addr(0xBF_6123, SnesABus, Sa1), 0xE7_E123);
+
+        assert_eq!(translate_addr(0x40_0123, SnesABus, Sa1), 0xE0_0123);
+        assert_eq!(translate_addr(0x40_8123, SnesABus, Sa1), 0xE0_8123);
+        assert_eq!(translate_addr(0x41_0123, SnesABus, Sa1), 0xE1_0123);
+        assert_eq!(translate_addr(0x4F_0123, SnesABus, Sa1), 0xEF_0123);
     }
 }
