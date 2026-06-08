@@ -13,9 +13,12 @@ use tokio::sync::mpsc::{self};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming, async_trait, transport::Server};
-use tracing::trace;
+use tracing::{debug, trace};
 
-use crate::snes::{self, Snes};
+use crate::{
+    server::sni::grpc::MemoryMapping,
+    snes::{self, Snes},
+};
 
 /// Runs the SNI gRPC server.
 pub async fn run(
@@ -172,9 +175,100 @@ async fn handle<Req, Resp, F: Future<Output = Result<Resp, Status>>>(
 impl DeviceMemory for Arc<SniService> {
     async fn mapping_detect(
         &self,
-        _request: Request<grpc::DetectMemoryMappingRequest>,
+        request: Request<grpc::DetectMemoryMappingRequest>,
     ) -> Result<Response<grpc::DetectMemoryMappingResponse>, Status> {
-        Err(Status::unimplemented("Reading from ROM is unsupported"))
+        let request = request.into_inner();
+
+        const HEADER_LEN: usize = 0x50;
+        fn mapping_from_header(header: &[u8]) -> MemoryMapping {
+            match header[0x25] & !0x10 {
+                0x20 => MemoryMapping::LoRom,
+                0x21 => MemoryMapping::HiRom,
+                0x23 => MemoryMapping::Sa1,
+                0x25 => MemoryMapping::ExHiRom,
+                _ => MemoryMapping::Unknown,
+            }
+        }
+
+        if let Some(header) = &request.rom_header00_ffb0 {
+            if header.len() < 0x30 {
+                return Err(Status::invalid_argument("Header is too short"));
+            }
+
+            return Ok(Response::new(match mapping_from_header(&header[0x10..]) {
+                MemoryMapping::Unknown => grpc::DetectMemoryMappingResponse {
+                    uri: self.uri.clone(),
+                    memory_mapping: request.fallback_memory_mapping().into(),
+                    confidence: false,
+                    rom_header00_ffb0: request.rom_header00_ffb0.unwrap(),
+                },
+                m => grpc::DetectMemoryMappingResponse {
+                    uri: self.uri.clone(),
+                    memory_mapping: m.into(),
+                    confidence: true,
+                    rom_header00_ffb0: request.rom_header00_ffb0.unwrap(),
+                },
+            }));
+        }
+        let mut best = (None, i32::MIN);
+        for offset in [0x7FB0, 0xFFB0, 0x40FFB0] {
+            let mut score = 0;
+            let header = self
+                .snes
+                .read(offset, HEADER_LEN)
+                .await
+                .map_err(internal_error)?;
+            debug!("header offset {offset:#x}: {header:x?}");
+            if header.len() != HEADER_LEN {
+                return Err(Status::internal("header read returned wrong length"));
+            }
+            let mapping = mapping_from_header(&header);
+            let checksum = u16::from_le_bytes(*header[0x2e..][..2].as_array().unwrap());
+            let complement = u16::from_le_bytes(*header[0x2c..][..2].as_array().unwrap());
+            let reset = u16::from_le_bytes(*header[0x4c..][..2].as_array().unwrap());
+            let title = &header[0x10..0x25];
+            if reset < 0x8000 {
+                score -= 1000;
+            }
+            if checksum != !complement {
+                score -= 100;
+            }
+
+            score -= title
+                .iter()
+                .map(|c| match c {
+                    0x20..=0x7e => 0,
+                    0x0 => 1,
+                    c if c.is_ascii_whitespace() => 1,
+                    _ => 2,
+                })
+                .sum::<i32>();
+
+            score -= match (offset, mapping) {
+                (0x7FB0, MemoryMapping::LoRom | MemoryMapping::Sa1) => 0,
+                (0xFFB0, MemoryMapping::HiRom) => 0,
+                (0x40FFB0, MemoryMapping::ExHiRom) => 0,
+
+                _ => 20,
+            };
+
+            debug!("detected mapping {mapping:?} with score {score}");
+            if score > best.1 {
+                best = (Some(header), score);
+            }
+        }
+
+        let mapping = mapping_from_header(best.0.as_deref().unwrap());
+        Ok(Response::new(grpc::DetectMemoryMappingResponse {
+            uri: self.uri.clone(),
+            memory_mapping: match mapping {
+                MemoryMapping::Unknown => request.fallback_memory_mapping(),
+                m => m,
+            }
+            .into(),
+            confidence: mapping != MemoryMapping::Unknown,
+            rom_header00_ffb0: best.0.unwrap(),
+        }))
     }
     /// read a single memory segment with a given size from the given device:
     async fn single_read(
