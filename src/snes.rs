@@ -74,6 +74,7 @@ enum Command {
     Read,
     Write,
     WaitNMI,
+    Version,
 }
 
 type Serial = BufReader<SerialStream>;
@@ -344,10 +345,16 @@ impl Snes {
             }
             trace!("sync 3/3");
 
+            tx.write_all(&[Command::Version as u8]).await?;
+            if rx.read_u8().await? != 1 {
+                continue 'retry;
+            }
+            let version = rx.read_u8().await?;
+            info!("Connection established. Protocol version: {version}");
+
             break;
         }
 
-        info!("Connection established");
         Ok(())
     }
 
